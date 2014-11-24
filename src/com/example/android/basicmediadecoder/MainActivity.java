@@ -50,6 +50,8 @@ public class MainActivity extends Activity {
 
     private static final String TAG = "MainActivity";
 
+    private static final String MEDIA_PATH = "/sdcard/chu.mp4";
+    
     private TextureView mPlaybackView;
     private TextView mAttribView = null;
     private Handler mUIHandler = new Handler( getBackgroundLooper() );
@@ -108,14 +110,18 @@ public class MainActivity extends Activity {
     private MediaCodec decoderAudio;
     private Surface surface;
     private AudioTrack audioTracker;
+    private boolean isAudioNeedNext;
+    
+    private int sampleRate;
+    private int channelCount;
 
     public void runDecoder() {
         Log.v(TAG, "runDecoder");
         extractorVideo = new MediaExtractor();
         extractorAudio = new MediaExtractor();
         try {
-            extractorVideo.setDataSource("/sdcard/snsd_720p.mp4");
-            extractorAudio.setDataSource("/sdcard/snsd_720p.mp4");
+            extractorVideo.setDataSource(MEDIA_PATH);
+            extractorAudio.setDataSource(MEDIA_PATH);
         } catch (IOException e1) {
             e1.printStackTrace();
             return;
@@ -129,12 +135,7 @@ public class MainActivity extends Activity {
         long videoDelayMin = -10000l;
         long videoDelayMax = 30000l;
         long audioDelayMin = -10000l;
-        long audioDelayMax = 30000l;
-
-        audioTracker = new AudioTrack(AudioManager.STREAM_MUSIC, 44100,
-                AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT,
-                44100, AudioTrack.MODE_STREAM);        
-        audioTracker.play();
+        long audioDelayMax = 30000l;        
 
         int videoTrackerIdx = -1;
         int audioTrackerIdx = -1;
@@ -152,16 +153,42 @@ public class MainActivity extends Activity {
                 break;
             }
         }
+        int channelConfig = AudioFormat.CHANNEL_OUT_STEREO;
         if (runAudio) {
             for (int i = 0; i < extractorAudio.getTrackCount(); i++) {
                 MediaFormat format = extractorAudio.getTrackFormat(i);
                 String mime = format.getString(MediaFormat.KEY_MIME);
                 extractorAudio.unselectTrack(i);
-                if (mime.startsWith("audio/")) {
+                if (mime.startsWith("audio/")) {   
                     decoderAudio = MediaCodec.createDecoderByType(mime);
                     decoderAudio.configure(format, null, null, 0);
                     audioTrackerIdx = i;
                     extractorAudio.selectTrack(i);
+                    
+                    // TODO:
+                    // init audio 
+                    submittedBytes = 0;
+                    temporaryBufferSize = 0;
+                    lastRawPlaybackHeadPosition = 0;
+                    rawPlaybackHeadWrapCount = 0;
+                    sampleRate = format.getInteger( MediaFormat.KEY_SAMPLE_RATE );
+                    channelCount = format.getInteger( MediaFormat.KEY_CHANNEL_COUNT );
+                    frameSize = 2 * channelCount;                    
+                    switch (channelCount) {
+                      case 1:
+                        channelConfig = AudioFormat.CHANNEL_OUT_MONO;
+                        break;
+                      case 2:
+                        channelConfig = AudioFormat.CHANNEL_OUT_STEREO;
+                        break;
+                      case 6:
+                        channelConfig = AudioFormat.CHANNEL_OUT_5POINT1;
+                        break;
+                    }
+                    bufferSize = AudioTrack.getMinBufferSize(sampleRate, channelConfig,
+                            AudioFormat.ENCODING_PCM_16BIT);
+                    Log.v( TAG, "sampleRate: " + sampleRate );
+                    Log.v( TAG, "bufferSize: " + bufferSize );
                     break;
                 }
             }
@@ -175,6 +202,10 @@ public class MainActivity extends Activity {
             Log.e("DecodeActivity", "Can't find audio info!");
             return;
         }
+        audioTracker = new AudioTrack(AudioManager.STREAM_MUSIC, sampleRate,
+                channelConfig, AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize, AudioTrack.MODE_STREAM);        
+        audioTracker.play();
 
         Log.v(TAG, "proc: decoder start");
         decoderVideo.start();
@@ -204,6 +235,9 @@ public class MainActivity extends Activity {
         
         int videoDequeuCounter = 0;
         int audioDequeuCounter = 0;
+        
+        isAudioNeedNext = true;
+        int seekPosMs = 10000;
 
         while (mIsRunning) {
 //            avaliableInput.dump();
@@ -239,15 +273,21 @@ public class MainActivity extends Activity {
                               
                 do { 
                     BufferInfo info = new BufferInfo();
-                    int videoOutIdx = decoderVideo.dequeueOutputBuffer(info, 0);                   
+                    int videoOutIdx = decoderVideo.dequeueOutputBuffer(info, 0);
+                    if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        Log.e( TAG, "BUFFER_FLAG_END_OF_STREAM" );
+                    }
                     if ( videoOutIdx < 0 ) {
                         if ( MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED == videoOutIdx ) {
                             videoOutputBuffers = decoderVideo.getOutputBuffers();
                             vecVideoOutIndex.clear();
                             vecVideoInfo.clear();                            
                         }
+                        else if ( MediaCodec.INFO_OUTPUT_FORMAT_CHANGED == videoOutIdx ) {
+                            Log.e( TAG, "INFO_OUTPUT_FORMAT_CHANGED" );
+                        }
                         break;
-                    }
+                    }                    
                     ++videoDequeuCounter;
                     vecVideoOutIndex.offer( videoOutIdx );
                     vecVideoInfo.offer( info );
@@ -255,11 +295,17 @@ public class MainActivity extends Activity {
                 do { 
                     BufferInfo info = new BufferInfo();
                     int audioOutIdx = decoderAudio.dequeueOutputBuffer(info, 0);
+                    if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                        Log.e( TAG, "BUFFER_FLAG_END_OF_STREAM" );
+                    }
                     if ( audioOutIdx < 0 ) {
                         if ( MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED == audioOutIdx ) {
                             audioOutputBuffers = decoderAudio.getOutputBuffers();
                             vecAudioOutIndex.clear();
                             vecAudioInfo.clear();                            
+                        }
+                        else if ( MediaCodec.INFO_OUTPUT_FORMAT_CHANGED == audioOutIdx ) {
+                            Log.e( TAG, "INFO_OUTPUT_FORMAT_CHANGED" );
                         }
                         break;
                     }
@@ -275,6 +321,10 @@ public class MainActivity extends Activity {
                 Log.v( TAG, "vecVideoOutIndex size: " + vecVideoOutIndex.size() );
                 Log.v( TAG, "vecAudioOutIndex size: " + vecAudioOutIndex.size() );
                 
+                if ( seekPosMs != 0 ) {
+                    extractorVideo.seekTo( seekPosMs * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC );
+                    seekPosMs = 0;
+                }                
                 do {
                     int trackIdx = extractorVideo.getSampleTrackIndex();                    
                     Log.v(TAG, "video getSampleTrackIndex: " + trackIdx);
@@ -319,30 +369,33 @@ public class MainActivity extends Activity {
                 }
                 videoTimestampUs = nowUs - startedUs;
                 audioTimestampUs = nowUs - startedUs;
-                Log.v( TAG, "play video & audio ===========> " + (nowUs-startedUs) );
+                Log.v( TAG, "play both ===========> " + (nowUs-startedUs) );
                 while ( !vecAudioOutIndex.isEmpty() ) {
                     int audioOutIdx = vecAudioOutIndex.peek();
                     BufferInfo info = vecAudioInfo.peek();
                     if ( forceShow ) {               
                         audioTimestampUs = info.presentationTimeUs;
-                        writeAudioTrack( audioTracker, audioOutputBuffers[audioOutIdx], info.size );
+                        writeAudioTrack( audioTracker, audioOutputBuffers[audioOutIdx], info.offset, info.size );
                         decoderAudio.releaseOutputBuffer( audioOutIdx, false );
-                    }
+                    } 
                     else {
                         long delayUs = ( nowUs - startedUs - info.presentationTimeUs );
                         Log.v( TAG, "releaseOutputBuffer audio ready: " + delayUs );
-                        if ( delayUs > audioDelayMin ) {
-                            audioOutIdx = vecAudioOutIndex.poll();
-                            info = vecAudioInfo.poll();
+                        if ( delayUs > audioDelayMin ) {                            
                             if ( delayUs > audioDelayMax ) {
                                 Log.v( TAG, "drop audio" );
+                                audioOutIdx = vecAudioOutIndex.poll();
+                                info = vecAudioInfo.poll();
                                 decoderAudio.releaseOutputBuffer( audioOutIdx, false );
                             }
                             else {
                                 Log.v( TAG, "play audio: " + info.presentationTimeUs );
                                 audioTimestampUs = info.presentationTimeUs;
-                                writeAudioTrack( audioTracker, audioOutputBuffers[audioOutIdx], info.size );
-                                decoderAudio.releaseOutputBuffer( audioOutIdx, false );
+                                if ( writeAudioTrack( audioTracker, audioOutputBuffers[audioOutIdx], info.offset, info.size ) ) {
+                                    audioOutIdx = vecAudioOutIndex.poll();
+                                    info = vecAudioInfo.poll();
+                                    decoderAudio.releaseOutputBuffer( audioOutIdx, false );                                    
+                                }                                
                             }
                         }
                         else {
@@ -359,7 +412,7 @@ public class MainActivity extends Activity {
                         decoderVideo.releaseOutputBuffer( videoOutIdx, true );
                     }
                     else {                        
-                        long delayUs = ( nowUs - startedUs - info.presentationTimeUs );
+                        long delayUs = ( audioTimestampUs - info.presentationTimeUs );
                         Log.v( TAG, "releaseOutputBuffer video ready: " + delayUs );
                         if ( delayUs > videoDelayMin ) {
                             videoOutIdx = vecVideoOutIndex.poll();
@@ -390,6 +443,57 @@ public class MainActivity extends Activity {
         extractorVideo.release();
     }
 
+    private long submittedBytes; 
+    private int temporaryBufferSize;
+    private long lastRawPlaybackHeadPosition;
+    private long rawPlaybackHeadWrapCount;
+    private long frameSize;
+    private int bufferSize;
+    private long getPlaybackHeadPosition( AudioTrack audioTracker ) {
+        long rawPlaybackHeadPosition = 0xFFFFFFFFL & audioTracker.getPlaybackHeadPosition();
+        if (lastRawPlaybackHeadPosition > rawPlaybackHeadPosition) {
+          // The value must have wrapped around.
+          rawPlaybackHeadWrapCount++;
+        }
+        lastRawPlaybackHeadPosition = rawPlaybackHeadPosition;
+        return rawPlaybackHeadPosition + (rawPlaybackHeadWrapCount << 32);
+      }
+    private byte[] temporaryBuffer = null;
+    private int temporaryBufferOffset = 0;
+    private boolean writeAudioTrack(AudioTrack audioTracker, ByteBuffer buf,
+            int offset, int size) {
+        
+        if ( temporaryBufferSize == 0 ) {
+            // Copy {@code buffer} into {@code temporaryBuffer}.
+            // TODO: Bypass this copy step on versions of Android where [redacted] is implemented.
+            if (temporaryBuffer == null || temporaryBuffer.length < size) {
+              temporaryBuffer = new byte[size];
+            }
+            buf.position(offset);
+            buf.get(temporaryBuffer, 0, size);
+            temporaryBufferOffset = 0;
+            temporaryBufferSize = size;
+        }
+        
+        int bytesPending = (int) (submittedBytes - getPlaybackHeadPosition( audioTracker ) * frameSize);
+        Log.v( TAG, "bytesPending: " + bytesPending );
+        int bytesToWrite = bufferSize - bytesPending;
+        Log.v( TAG, "bytesToWrite: " + bytesToWrite );
+
+        if (bytesToWrite > 0) {
+          bytesToWrite = Math.min(temporaryBufferSize, bytesToWrite);
+          audioTracker.write(temporaryBuffer, temporaryBufferOffset, bytesToWrite);
+          temporaryBufferOffset += bytesToWrite;
+          temporaryBufferSize -= bytesToWrite;
+          submittedBytes += bytesToWrite;
+          Log.v( TAG, "temporaryBufferSize: " + temporaryBufferSize );
+          if ( 0 == temporaryBufferSize ) {
+              return true;
+          }
+        }
+        return false;
+    }
+    /*
     private void writeAudioTrack(AudioTrack audioTracker, ByteBuffer buf,
             int size) {
         if (null == audioTracker) {
@@ -407,4 +511,14 @@ public class MainActivity extends Activity {
             }
         }
     }
+    */
+    
+    private static final long MICROS_PER_SECOND = 1000000l;
+    private long framesToDurationUs(long frameCount) {
+        return (frameCount * MICROS_PER_SECOND) / sampleRate;
+      }
+
+      private long durationUsToFrames(long durationUs) {
+        return (durationUs * sampleRate) / MICROS_PER_SECOND;
+      }
 }
