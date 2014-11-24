@@ -16,7 +16,13 @@
 
 package com.example.android.basicmediadecoder;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
 import java.util.LinkedList;
 import java.util.Queue;
@@ -50,7 +56,7 @@ public class MainActivity extends Activity {
 
     private static final String TAG = "MainActivity";
 
-    private static final String MEDIA_PATH = "/sdcard/chu.mp4";
+    private static final String MEDIA_PATH = "/sdcard/demo.ts";
     
     private TextureView mPlaybackView;
     private TextView mAttribView = null;
@@ -114,17 +120,64 @@ public class MainActivity extends Activity {
     
     private int sampleRate;
     private int channelCount;
+    
+    private static class TsDataSource implements InvocationHandler {
+        private RandomAccessFile mFile;
+        
+        public TsDataSource( String path ) {
+            mFile = null;
+            try {
+                mFile = new RandomAccessFile( path, "r" );
+            } catch (FileNotFoundException e) {
+                e.printStackTrace();
+            }
+        }
+        
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args)
+                throws Throwable {
+            String methodName = method.getName();
+            if ("readAt".equals(methodName)) {
+                if ( mFile != null ) {
+                    try {
+                        mFile.seek( (Long)args[0] );
+                        return mFile.read( (byte[])args[1] );
+                    } catch (IOException e) {
+                        // TODO Auto-generated catch block
+                        e.printStackTrace();
+                    }                
+                }
+                return 0;
+            } else if ("getSize".equals(methodName)) {
+                return -1;
+            }
+            return null;
+        }       
+    }
+    
+    private static boolean kUseStreamingDataSource = true;
+    private TsDataSource mVideoDataSource;
+    private TsDataSource mAudioDataSource;    
 
     public void runDecoder() {
         Log.v(TAG, "runDecoder");
         extractorVideo = new MediaExtractor();
         extractorAudio = new MediaExtractor();
-        try {
-            extractorVideo.setDataSource(MEDIA_PATH);
-            extractorAudio.setDataSource(MEDIA_PATH);
-        } catch (IOException e1) {
-            e1.printStackTrace();
-            return;
+        
+        if ( kUseStreamingDataSource ) {
+           mVideoDataSource = new TsDataSource( MEDIA_PATH );
+            mAudioDataSource = new TsDataSource( MEDIA_PATH );        
+            setDataSource( extractorVideo, mVideoDataSource );
+            setDataSource( extractorAudio, mAudioDataSource );
+        }
+        else {
+            try {
+                extractorVideo.setDataSource(MEDIA_PATH);
+                extractorAudio.setDataSource(MEDIA_PATH);
+            } catch (IOException e1) {
+                e1.printStackTrace();
+                return;
+            }
         }
 
         mIsRunning = true;
@@ -338,7 +391,9 @@ public class MainActivity extends Activity {
                             break;
                         }
                         int videoInIdx = vecVideoInIndex.poll();
+                        Log.v( TAG, "readSampleData video ++" );
                         int size = extractorVideo.readSampleData( videoInputBuffers[videoInIdx], 0 );
+                        Log.v( TAG, "readSampleData video --" );
                         extractorVideo.advance();
                         decoderVideo.queueInputBuffer( videoInIdx, 0, size, presentationTimeUs, 0 );                        
                     }
@@ -357,7 +412,9 @@ public class MainActivity extends Activity {
                             break;
                         }
                         int audioInIdx = vecAudioInIndex.poll();
+                        Log.v( TAG, "readSampleData audio ++" );
                         int size = extractorAudio.readSampleData( audioInputBuffers[audioInIdx], 0 );
+                        Log.v( TAG, "readSampleData audio --" );
                         extractorAudio.advance();
                         decoderAudio.queueInputBuffer( audioInIdx, 0, size, presentationTimeUs, 0 );                        
                     }
@@ -520,5 +577,53 @@ public class MainActivity extends Activity {
 
       private long durationUsToFrames(long durationUs) {
         return (durationUs * sampleRate) / MICROS_PER_SECOND;
+      }
+      
+   // TODO:
+      // private method
+      private boolean setDataSource( Object mediaExtractor, InvocationHandler dataSource ) {
+          
+          final String kDataSourceClass = "android.media.DataSource";
+          final String kMediaExtractorClass = "android.media.MediaExtractor";
+          final String kSetDataSourceMethod = "setDataSource";
+          
+          Class clsDataSource = null;
+          try {
+              clsDataSource = Class.forName( kDataSourceClass );
+          } catch (ClassNotFoundException e) {
+              Log.e( TAG, "ClassNotFoundException: " + kDataSourceClass );
+              return false;
+          }
+
+          Object dataSourceInstantance = Proxy.newProxyInstance(clsDataSource.getClassLoader(),
+                  new Class[] { clsDataSource }, dataSource );
+
+          Class clsMediaExtractor = null;
+          try {
+              clsMediaExtractor = Class.forName( kMediaExtractorClass );
+          } catch (ClassNotFoundException e) {
+              Log.e( TAG, "ClassNotFoundException: " + kMediaExtractorClass );
+              return false;
+          }
+          Method method = null;
+          try {
+              method = clsMediaExtractor.getMethod( kSetDataSourceMethod, new Class[] { clsDataSource } );
+          } catch (NoSuchMethodException e) {
+              Log.e( TAG, "NoSuchMethodException: " + kSetDataSourceMethod );
+              return false;
+          }
+          try {
+              method.invoke( mediaExtractor, dataSourceInstantance );
+          } catch (IllegalAccessException e) {
+              Log.e( TAG, "invoke IllegalAccessException: " + kSetDataSourceMethod );
+              return false;
+          } catch (IllegalArgumentException e) {
+              Log.e( TAG, "invoke IllegalArgumentException: " + kSetDataSourceMethod );
+              return false;
+          } catch (InvocationTargetException e) {
+              Log.e( TAG, "invoke InvocationTargetException: " + kSetDataSourceMethod );
+              return false;
+          }
+          return true;
       }
 }
